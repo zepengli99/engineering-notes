@@ -9,6 +9,7 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 | | Topic | What's inside |
 |---|---|---|
 | ⚙️ | [Concurrency](concurrency/) | Threads, GIL, multiprocessing, asyncio, race conditions |
+| 🗄️ | [Transactions](transactions/) | ACID, MVCC, isolation levels, WAL, write skew |
 
 More topics added over time.
 
