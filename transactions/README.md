@@ -510,6 +510,73 @@ Data files are single current state — always overwritten in-place. Old version
 
 ---
 
+## What this means for backend development
+
+Understanding MVCC and transaction internals directly informs how to write correct, performant backend code under concurrency.
+
+### Practical rules
+
+**Keep transactions short.**
+
+Long transactions hold their snapshot open, preventing autovacuum from cleaning old MVCC row versions. The longer a transaction lives, the more dead row versions accumulate in heap files — this is **table bloat**, a real operational problem. Don't do HTTP calls, user input, or heavy computation inside a transaction. A transaction should only wrap: read → decide → write.
+
+**Push computation into the database.**
+
+Lost update is an application-layer bug. The fix is to never read a value into application memory, compute, and write back an absolute value. Let the database do it atomically:
+
+```sql
+-- dangerous: read 1000 into Python, compute 1100, write back 1100
+UPDATE accounts SET balance = 1100 WHERE name = 'Alice'
+
+-- safe: expression evaluated inside DB against current committed value
+UPDATE accounts SET balance = balance + 100 WHERE name = 'Alice'
+```
+
+**Know what your isolation level does and doesn't protect.**
+
+Most frameworks default to READ COMMITTED. It only prevents dirty reads. Everything else is on you.
+
+```
+READ COMMITTED  → prevents dirty read only
+REPEATABLE READ → also prevents non-repeatable read and phantom read
+SERIALIZABLE    → prevents everything including write skew, but aborts may happen
+```
+
+**Write skew is the most commonly missed concurrency bug.**
+
+Any time your code does "read some aggregate, check a condition, then write" — that's a write skew candidate. Library inventory, account balances, seat booking, on-call schedules. REPEATABLE READ doesn't protect against it because the writes touch different rows.
+
+```python
+# write skew pattern — watch out for this
+total = db.query("SELECT SUM(balance) FROM accounts")
+if total - withdraw >= MIN_TOTAL:
+    db.execute("UPDATE accounts SET balance = balance - %s WHERE name = %s", ...)
+```
+
+Fix: `SELECT ... FOR UPDATE` on everything you read, or use `SERIALIZABLE`.
+
+**Read replicas are safe because of MVCC.**
+
+MVCC guarantees readers never block writers and writers never block readers. This is the theoretical foundation for read replicas — you can confidently route read traffic to replicas without worrying that write activity on the primary will stall reads.
+
+---
+
+### The bigger picture — optimistic concurrency
+
+PostgreSQL's MVCC is fundamentally **optimistic**: don't lock upfront, let everyone run concurrently, detect conflicts at commit time. This pattern appears at every layer of distributed systems:
+
+```
+MVCC row versions  →  optimistic locking / version-based CAS in application code
+snapshot           →  distributed snapshots (Kafka consumer offsets, HLC timestamps)
+procarray          →  distributed coordinator (ZooKeeper, etcd — tracking live nodes)
+CLOG               →  distributed commit log (two-phase commit, Saga pattern)
+autovacuum         →  background GC (any system that defers cleanup)
+```
+
+Once you understand how a database manages concurrent transactions, distributed system designs stop being mysterious. They're the same ideas applied at a larger scale: give each operation a consistent view of the world, track what's committed vs in-flight, clean up old state when it's no longer needed.
+
+---
+
 ## Summary
 
 | Property | Who guarantees it | Mechanism |
