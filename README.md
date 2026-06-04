@@ -10,6 +10,7 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 |---|---|---|
 | ⚙️ | [Concurrency](concurrency/) | Threads, GIL, multiprocessing, asyncio, race conditions |
 | 🗄️ | [Transactions](transactions/) | ACID, MVCC, isolation levels, WAL, write skew |
+| 📦 | [Caching](caching/) | Cache-Aside, stampede, avalanche, penetration, Redis internals |
 
 More topics added over time.
 
