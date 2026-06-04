@@ -350,6 +350,58 @@ if cached:
 
 ---
 
+### Cache Eviction
+
+Cache memory is finite. When it's full, Redis needs to decide what to delete to make room for new data.
+
+```bash
+# redis.conf or at runtime
+CONFIG SET maxmemory 256mb
+CONFIG SET maxmemory-policy allkeys-lru
+```
+
+**Three fundamental strategies:**
+
+**LRU (Least Recently Used)** — evict the key that hasn't been accessed the longest.
+
+```
+Access history: A B C A B
+Eviction candidate: C  (accessed longest ago)
+```
+
+Good for general-purpose caching. Assumption: recent access predicts future access.
+
+**LFU (Least Frequently Used)** — evict the key with the fewest total accesses.
+
+```
+Access counts: A=100, B=3, C=50
+Eviction candidate: B  (accessed fewest times)
+```
+
+Good for long-running caches with stable hot keys. A viral video should stay in cache even if it hasn't been accessed in the last minute — LRU might evict it, LFU keeps it because its count is high.
+
+**FIFO (First In, First Out)** — evict the oldest written key regardless of access pattern. Ignores actual usage, rarely useful in production.
+
+**Redis eviction policies:**
+
+```
+noeviction        return error on write when full (default — almost always wrong for cache)
+allkeys-lru       LRU across all keys             (most common choice)
+allkeys-lfu       LFU across all keys             (better when hot data is stable)
+volatile-lru      LRU only among keys with TTL set
+volatile-lfu      LFU only among keys with TTL set
+volatile-ttl      evict keys closest to expiry first
+allkeys-random    random eviction (rarely useful)
+```
+
+> **Q I had: does Redis implement exact LRU?**
+> No. Exact LRU requires tracking access time for every key, which costs memory proportional to key count. Redis uses **approximate LRU**: on eviction, it samples a small set of keys (default 5) and evicts the least recently used among the sample. Larger sample = more accurate but slower. The approximation is good enough in production.
+
+> **Q I had: when would I use LFU over LRU?**
+> LRU has a weakness: a one-time batch scan reading millions of keys will evict all your hot data, replacing it with keys that will never be accessed again. LFU is immune — those one-time keys have low frequency counts. If your workload has periodic batch reads or a long tail of rarely-used keys, LFU is more stable.
+
+---
+
 ## What this means for backend development
 
 ### The same pattern at every layer
