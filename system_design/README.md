@@ -4,6 +4,45 @@ Architecture evolution notes — how a system grows from a single server to a cl
 
 The core pattern repeats: a bottleneck appears, a targeted fix is added, the fix creates a new bottleneck. Every component here exists to solve a specific, real problem.
 
+```
+single server
+    └─ app + DB on one machine → resource contention
+app / DB separation
+    └─ dedicate one machine per role → independent scaling
+multi-level cache
+    └─ DB hammered by reads → intercept hot reads in memory
+DB read/write split
+    └─ read capacity ceiling → replicas handle reads, primary handles writes
+sharding
+    └─ single table too large → distribute data across machines
+CDN + reverse proxy
+    └─ distant users slow, servers exposed → edge caching + shielded entry point
+search engine + NoSQL
+    └─ relational DB struggles with full-text search and flexible schemas
+distributed architecture + microservices
+    └─ monolith too big to change, scale, or own → split by business domain
+message queue
+    └─ synchronous service chains cascade failures → async decoupling
+containers + K8s
+    └─ hundreds of services, environment hell → package once, run anywhere, auto-manage
+cloud-native
+    └─ on-prem capacity planning is waste → elastic resources, pay per use
+```
+
+---
+
+## Architect's rules
+
+1. **No best architecture — only the most appropriate for the current business.** A startup should start with a single machine. Architecture follows business growth, not the other way around.
+
+2. **Architecture evolution trades complexity for performance.** Every layer added — cache, load balancer, message queue — is a new moving part. Add it only when the pain it solves outweighs the complexity it introduces.
+
+3. **Always optimise for five goals: high performance, high availability, scalability, extensibility, security.**
+
+---
+
+## Concepts
+
 ---
 
 ## Concepts
@@ -339,6 +378,169 @@ CAP is not a design-time menu of options. It describes the forced trade-off when
 
 ---
 
+### CDN and reverse proxy
+
+#### CDN (Content Delivery Network)
+
+Users far from the data centre experience high latency — a round trip from Guangzhou to a Beijing server takes tens of milliseconds just from physics. Adding more servers doesn't help; the data still has to travel the same distance.
+
+CDN is a solution (not a specific technology) sold by providers (Cloudflare, AWS CloudFront, Alibaba Cloud CDN). You buy access to their global network of edge nodes and point your domain at it. The provider handles everything else.
+
+**How it works — pull-on-demand caching:**
+
+```
+first user in Guangzhou requests logo.png
+    ↓
+DNS resolves to nearest Guangzhou edge node
+    ↓
+node has no cache (cold) → fetches from origin data centre
+    ↓
+node caches the file, returns to user
+
+every subsequent Guangzhou user
+    ↓
+edge node returns cached file directly — origin never contacted
+```
+
+CDN is only for **static assets** (JS, CSS, images, video) — content that rarely changes and can be cached. Dynamic requests (place order, query balance) must reach the origin server. When static assets are updated, you explicitly purge the CDN cache so nodes re-fetch from origin.
+
+CDN is effectively the geographic dimension of caching — the same core idea as Redis or browser cache, applied to network distance rather than data access speed.
+
+```
+browser cache     → zero network cost
+CDN edge node     → milliseconds (geographically close)
+local/Redis cache → microseconds (within data centre)
+database          → milliseconds (disk)
+```
+
+Every layer asks the same question: can we avoid sending this request further than necessary?
+
+#### Reverse proxy
+
+A reverse proxy sits between the public internet and the internal app servers. All traffic hits the proxy first; app servers live on a private network and are never directly exposed.
+
+```
+user → reverse proxy (public) → app servers (private network)
+```
+
+**What it handles centrally:**
+
+- **Hides real server IPs**: attackers can only see the proxy's IP. DDoS hits the proxy, not app servers.
+- **SSL termination**: HTTPS decryption happens once at the proxy. App servers receive plain HTTP — no certificates to configure per server, no CPU spent on crypto. When a certificate expires, update it in one place.
+- **Load balancing**: all traffic passes through here anyway, so request distribution is a natural fit. Nginx handles both roles simultaneously.
+- **Rate limiting and auth**: enforced at the single entry point rather than duplicated across every app server.
+
+**SSL/TLS in brief**: certificates prove a server is who it claims to be, issued by a trusted Certificate Authority (CA). The browser verifies the certificate, negotiates a session key using asymmetric encryption, then encrypts all further communication with that key. Without a certificate, a man-in-the-middle can impersonate the server and intercept credentials.
+
+With a reverse proxy, only the proxy needs a certificate. New app servers can be added without any SSL configuration.
+
+**Does the reverse proxy become a bottleneck?** Rarely. Nginx is event-driven and async — a single instance handles tens of thousands of concurrent connections while doing only lightweight work (forwarding, SSL, auth). App servers saturate long before Nginx does. At extreme scale, Nginx itself can be clustered with DNS round-robin or Anycast routing in front of it.
+
+```
+user → CDN (static assets returned immediately)
+          ↓ dynamic requests only
+       reverse proxy (SSL termination, auth, rate limiting, load balancing)
+          ↓
+       app server cluster
+          ↓
+       database
+```
+
+---
+
+### Search engines and NoSQL
+
+#### Why relational databases struggle in certain scenarios
+
+MySQL excels at precise queries with known structure:
+
+```sql
+SELECT * FROM orders WHERE user_id = 42
+SELECT * FROM users WHERE email = 'foo@bar.com'
+```
+
+Two structural limitations drive the need for specialised databases:
+
+**1. Full-text and fuzzy search**
+
+MySQL's B+ tree index is sorted by complete field values. It can answer "starts with X" but not "contains X" — there's no anchor point to start from, so the engine must scan every row.
+
+```sql
+LIKE 'iPhone%'    -- can use index (prefix match, has an anchor)
+LIKE '%phone%'    -- full table scan (no anchor, index useless)
+```
+
+Other common index-killing patterns:
+- Functions on indexed columns: `WHERE YEAR(created_at) = 2024` — B+ tree stores raw values, not computed results
+- Implicit type casting: `WHERE phone = 13800138000` on a VARCHAR column — triggers implicit conversion
+- Skipping a composite index prefix: index on `(a, b, c)`, querying `WHERE b = 2` — index is ordered by `a` first, skipping it makes it unusable
+
+**2. Rigid schema**
+
+MySQL requires every row to have the same structure defined at table creation. Storing entities with varying attributes (normal users vs merchants vs overseas users) means either many NULL columns or complex multi-table JOINs. Schema changes on large tables are expensive operations.
+
+#### Search engine (Elasticsearch)
+
+ES builds an **inverted index** — instead of "what words does this document contain", it stores "which documents contain this word":
+
+```
+documents:
+  doc 1001: "Samsung Galaxy S24 phone"
+  doc 1002: "Apple iPhone 15 phone"
+
+inverted index:
+  samsung → [1001]
+  phone   → [1001, 1002]
+  apple   → [1002]
+```
+
+Searching "phone" looks up the inverted index directly — no table scan. Searching "apple phone" tokenises to ["apple", "phone"], intersects the results, and returns 1002.
+
+**Typical architecture**: MySQL stores the source of truth. ES stores a subset of fields needed for search and listing pages. A CDC pipeline (Canal for MySQL, Debezium for PostgreSQL) monitors the binlog/WAL and syncs changes to ES via Kafka. This sync is async — eventual consistency (AP).
+
+```
+write → MySQL
+           ↓ binlog/WAL
+        Canal/Debezium → Kafka → ES
+
+search request  → ES (returns id + display fields)
+detail request  → MySQL (full row by id)
+```
+
+#### NoSQL
+
+NoSQL ("Not Only SQL") is a family of databases that trade relational structure for flexibility or scale. Each type solves a specific problem MySQL handles poorly.
+
+**Document DB (MongoDB)**: stores JSON documents with no fixed schema. Each document can have different fields. Good for rapidly-changing data structures or entities with varying attributes.
+
+```json
+{ "id": 1, "name": "Alice", "email": "alice@example.com" }
+{ "id": 2, "name": "Bob", "shop_name": "Bob's Store", "license_no": "xxx" }
+```
+
+Trade-off: no joins, no strong transactions — consistency is the application's responsibility.
+
+**Key-value DB (Redis)**: the familiar cache. Simplest possible structure, nanosecond access.
+
+**Wide-column DB (HBase, Cassandra)**: built for massive write throughput and time-series queries — user behaviour logs, monitoring metrics, message history. Natively distributed, data auto-sharded across nodes. Trade-off: no complex queries, only key lookups and range scans.
+
+**Graph DB (Neo4j)**: stores nodes and edges natively. Traversing relationship networks ("friends of friends of friends") is a native operation — in MySQL it requires N self-joins that get exponentially slower with depth. Used for social graphs, recommendation engines, fraud detection.
+
+**One-line selection guide:**
+
+```
+precise queries, transactions          → MySQL
+full-text search, fuzzy search         → Elasticsearch
+cache, simple key-value                → Redis
+flexible schema, document storage      → MongoDB
+high-volume writes, time-series data   → HBase / Cassandra
+relationship networks                  → Neo4j
+```
+
+No single database handles everything well. Large systems typically run several simultaneously, each doing what it's best at.
+
+---
+
 ### Sharding
 
 Read/write split solves concurrency but not data volume. When a single table grows to hundreds of millions of rows, queries slow down and a single machine's disk starts to fill up. Sharding splits the data itself.
@@ -459,6 +661,232 @@ The shard key is effectively irreversible. Once data is distributed by a given k
 
 ---
 
+### Distributed architecture
+
+#### Why monoliths break down at scale
+
+A monolith bundles all business logic into one deployable unit. Three pain points emerge as the system grows:
+
+**Deployment coupling**: fixing a bug in the user module requires redeploying the entire application — all modules go down together, and the blast radius of a bad deploy is the whole system.
+
+**Team interference**: multiple teams editing the same codebase cause constant merge conflicts. One team's change can silently break another team's feature.
+
+**Coarse-grained scaling**: the order module is under load during a sale, but scaling requires adding capacity for the entire monolith — user and product modules get extra machines they don't need.
+
+The fix: split along business boundaries. Each service owns its domain, deploys independently, and scales independently.
+
+```
+user service    ← owns everything user-related
+product service ← owns everything product-related
+order service   ← owns everything order-related
+payment service ← owns everything payment-related
+```
+
+#### RPC (Remote Procedure Call)
+
+Before splitting, cross-module calls are in-process function calls. After splitting, they become network calls across machines. RPC frameworks make remote calls look like local function calls — serialisation, connection management, retries, and deserialisation are all handled by the framework.
+
+```python
+# without RPC: manual HTTP wiring
+response = requests.post("http://order-service/createOrder",
+                         json={"user_id": 42, "product_id": 1001})
+result = response.json()
+
+# with RPC: feels like a local call
+order = order_service.createOrder(user_id=42, product_id=1001)
+```
+
+#### Service registry and discovery
+
+RPC solves *how* to call. Service discovery solves *where* to call. Hardcoding IP addresses breaks as soon as a service scales or restarts on a new machine.
+
+A **registry** is a shared directory of running services:
+
+```
+order service starts → registers: { "order-service": "10.0.0.1:8080" }
+user service calls order service:
+  1. ask registry: "where is order-service?"
+  2. registry returns: ["10.0.0.1:8080", "10.0.0.2:8080"]
+  3. user service picks one and calls it
+```
+
+Services register on startup and send periodic heartbeats. If a heartbeat stops, the registry removes that instance from the list automatically. New instances appear in the list as soon as they register. Application code never needs to change.
+
+Common registries: Consul, Nacos, Etcd, Zookeeper.
+
+#### Microservice governance
+
+With many services, the problems shift from "how to build" to "how to keep stable and observable."
+
+**Circuit breaker**
+
+Synchronous service calls create dependency chains. One slow downstream service holds threads in every upstream caller — the slowness propagates up the chain until the whole system stalls.
+
+A circuit breaker mimics an electrical fuse. Three states:
+
+```
+closed (normal)  → requests pass through, error rate tracked
+    ↓ error rate exceeds threshold
+open (tripped)   → requests immediately take fallback path, downstream not called
+    ↓ after recovery window
+half-open (probe) → small fraction of requests let through to test downstream
+    ↓ downstream healthy
+closed (normal)
+```
+
+**Degradation** is the fallback when the circuit is open — return a reasonable default rather than an error:
+
+```
+recommendation service down → return default popular items (not blank)
+reviews service down        → return "reviews temporarily unavailable" (not 500)
+```
+
+Users see reduced functionality, not a crashed page.
+
+**Rate limiting**
+
+Circuit breaking is reactive (trips after failure). Rate limiting is proactive (caps requests before they overwhelm a service).
+
+- **Token bucket**: tokens are added to a bucket at a fixed rate. Each request consumes one token. Empty bucket = request rejected. Allows short bursts (accumulated tokens can be spent at once).
+- **Sliding window**: count requests in the last N seconds. Smoother than a fixed window — no spike at window boundaries.
+
+**Distributed tracing**
+
+A single user request fans out across many services. When something is slow or broken, tracing identifies exactly where.
+
+Every request is assigned a globally unique **Trace ID** that propagates through every service call:
+
+```
+request arrives → generate trace_id = "xyz789"
+gateway logs:         [xyz789] request received
+order service logs:   [xyz789] processing started
+stock service logs:   [xyz789] inventory query took 2000ms  ← bottleneck found
+logistics logs:       [xyz789] shipment created
+```
+
+Aggregating all logs with the same trace ID reconstructs the full call chain — latency at each hop, which service errored, where time was spent. Common tools: Jaeger, Zipkin.
+
+```
+rate limiting    → proactive: cap traffic at entry point before damage
+circuit breaker  → reactive: isolate failing downstream, protect upstream
+distributed tracing → diagnostic: find where in the chain the problem is
+```
+
+#### Message queue
+
+When services call each other synchronously, they form a chain where every step waits for the previous one. One slow or failing service stalls the entire chain.
+
+A message queue breaks this: producers drop a message and move on immediately. Consumers read at their own pace.
+
+```
+order service → drop message → return "order placed"
+                     ↓ (async)
+              stock service consumes → deduct stock
+              logistics service consumes → create shipment
+              notification service consumes → send SMS
+```
+
+**Three benefits:**
+
+- **Async decoupling**: order service doesn't wait for stock, logistics, or notifications. User sees a response immediately.
+- **Fault isolation**: notification service crashes → messages accumulate in the queue → order flow unaffected. Service recovers → resumes consuming.
+- **Peak shaving**: traffic spike dumps messages into the queue; downstream services drain at their sustainable rate. The queue absorbs the burst so backends never see it directly.
+
+**Not everything can be async.** Steps that require an immediate answer must stay synchronous:
+
+```
+must be sync:   check if stock is available, validate coupon
+can be async:   deduct stock, create shipment, send notification
+```
+
+**Three problems message queues introduce:**
+
+**1. Message loss** — can happen at three stages:
+
+```
+producer → queue → consumer
+   ↑          ↑        ↑
+stage 1    stage 2   stage 3
+```
+
+- Stage 1: producer sends, network drops it. Fix: queue sends ACK; producer retries until ACK received.
+- Stage 2: message in queue memory, not yet on disk, queue crashes. Fix: persist messages to disk on arrival (Kafka does this by default).
+- Stage 3: consumer receives message, crashes before finishing. Fix: consumer only sends ACK after processing completes; queue redelivers if no ACK.
+
+**2. Duplicate messages** — consumer processes a message, crashes before sending ACK, queue redelivers, consumer processes it again.
+
+Fix: **idempotency via unique message ID**. Before processing, check whether this ID has already been handled:
+
+```
+receive message (message_id = "abc123")
+    ↓
+check Redis: processed:abc123 exists? → yes → skip, send ACK
+                                      → no  → process business logic
+                                               write processed:abc123 = 1
+                                               send ACK
+```
+
+Critical detail: the business operation and the "mark as processed" write must be **atomic** — otherwise a crash between the two leaves no record, and the next delivery re-executes the business logic.
+
+```sql
+BEGIN
+  UPDATE stock SET count = count - 1 WHERE id = 1;
+  INSERT INTO processed_messages (message_id) VALUES ('abc123');  -- unique index
+COMMIT
+```
+
+If the INSERT fails (duplicate key), the transaction rolls back — the message was already handled. This is ACID atomicity applied at the application layer.
+
+**3. Message ordering** — Kafka spreads messages across partitions for throughput. Messages from the same user can land in different partitions and be consumed out of order.
+
+Fix: route all messages for the same business entity to the same partition using the entity's ID as the partition key:
+
+```
+user_id=42 messages → partition 2  (always)
+user_id=99 messages → partition 5  (always)
+```
+
+Within a partition, order is guaranteed. Across different users, order doesn't matter.
+
+Common queues: Kafka (high throughput, log/stream processing), RabbitMQ (feature-rich, general business messaging), RocketMQ (Alibaba, mature for e-commerce).
+
+#### Zookeeper as a registry
+
+Zookeeper is a distributed tree of nodes (znodes), similar to a filesystem:
+
+```
+/services/
+    order-service/
+        10.0.0.1:8080   ← ephemeral node
+        10.0.0.2:8080   ← ephemeral node
+    user-service/
+        10.0.0.3:8080   ← ephemeral node
+```
+
+Services create **ephemeral nodes** on startup. Ephemeral nodes are tied to the connection that created them — when the connection drops (service crashes), the node disappears automatically. No manual cleanup needed.
+
+Callers read the child nodes under a service path to get the address list, then do their own load balancing (round-robin or random).
+
+**Watch mechanism**: instead of polling Zookeeper on every call, callers register a Watch — "notify me when this path changes." Zookeeper pushes a notification when a node is added or removed; the caller updates its local cache. Watches are one-shot: after firing they must be re-registered.
+
+```
+register Watch on /services/order-service/
+    ↓
+(nothing, waiting)
+    ↓
+order service instance crashes → node deleted
+    ↓
+Zookeeper pushes notification
+    ↓
+caller updates local cache + re-registers Watch
+```
+
+Watch is publish-subscribe applied to distributed state — the same pattern as frontend event listeners or message queue subscriptions. It's also used for distributed config (config changes propagate instantly), distributed locks (waiters watch the lock node), and leader election (followers watch the leader node).
+
+**Zookeeper is CP**: writes require majority-node confirmation (ZAB protocol). Under a network partition, the minority partition refuses requests rather than returning potentially stale data. For service discovery, Nacos (configurable AP) is now more common — brief inconsistency in the address list is acceptable, but an unavailable registry is not.
+
+---
+
 ### Horizontal scaling and load balancing
 
 When a single app server hits its ceiling, the solution is to run multiple identical instances and distribute traffic across them. This is horizontal scaling.
@@ -504,11 +932,67 @@ Only 1/N of requests remap on a resize, versus nearly all with modulo.
 
 **Virtual nodes** handle uneven ring distribution. Each physical server is placed at multiple points on the ring (A1, A2, A3...). With enough virtual nodes the arc lengths equalise and load stays balanced even with few real servers.
 
-**Connection assignment is availability-based, not random.** The pool hands out whichever connection is currently idle. The application doesn't know or care which connection it gets — they're interchangeable.
+---
 
-The exception is explicit transactions. Once a `BEGIN` is issued, the pool locks that connection to the request for the entire transaction. The session state (open transaction, locks held) is tied to that specific connection and cannot be transferred mid-flight.
+### Containers and Kubernetes
+
+#### Docker
+
+Microservices mean hundreds of independent services, each needing its own environment. Configuring dependencies and runtime settings per machine is slow, error-prone, and produces the classic "works on my machine" problem.
+
+The fix: package the service and everything it needs to run into a single **image**:
 
 ```
-outside a transaction:   request may get any idle connection each time
-inside a transaction:    same connection held from BEGIN to COMMIT/ROLLBACK
+code + dependencies + runtime + config → image
 ```
+
+An image runs identically on any machine — dev laptop, test server, production node. No environment configuration needed on the target machine.
+
+Containers are much lighter than virtual machines. A VM emulates an entire OS; a container shares the host kernel and starts in seconds rather than minutes.
+
+#### Kubernetes (K8s)
+
+Docker solves packaging. K8s solves managing hundreds of containers across a fleet of machines:
+
+- **Scheduling**: decides which machine each container runs on based on available resources
+- **Auto-scaling**: detects traffic increase → adds containers; traffic drops → removes them
+- **Self-healing**: container crashes → automatically restarted; machine dies → containers migrated to healthy nodes
+- **Rolling deploys**: new version gradually replaces old, zero downtime
+
+```
+before sale:        10 order-service containers
+traffic spikes    → K8s scales to 100 containers automatically
+sale ends         → K8s scales back to 10
+container crashes → K8s restarts it within seconds
+```
+
+```
+Docker → solves "how to package and run a single service"
+K8s    → solves "how to manage hundreds of containers"
+```
+
+---
+
+### Cloud-native
+
+Running services on rented cloud VMs is not cloud-native — it's just a traditional architecture in someone else's data centre, still managed manually.
+
+**The core problem with on-prem**: hardware must be provisioned for peak load but sits mostly idle. Buying 10× capacity for a one-day sale wastes 9× the cost year-round.
+
+Cloud platforms turn compute into a utility:
+
+```
+normal day: use 10 machines, pay for 10
+sale day:   scale to 100 machines, pay for 100
+sale ends:  scale back to 10, stop paying for the rest
+```
+
+**Cloud-native** means designing the system from the start to exploit this elasticity — with containers, K8s auto-scaling, and microservices fine-grained enough that individual services scale independently. The engineering team never thinks about physical machines.
+
+Four pillars:
+- **Containerisation**: every service is a portable image
+- **Dynamic orchestration (K8s)**: auto-schedule, auto-scale, auto-heal
+- **Microservices**: fine-grained enough for per-service independent scaling
+- **DevOps + CI/CD**: code commit triggers automated build, test, deploy — minutes from change to production
+
+Cloud-native is where the architecture evolution ends: a system that automatically handles any traffic level, pays only for what it uses, and requires minimal operational intervention.
