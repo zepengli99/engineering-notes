@@ -996,3 +996,125 @@ Four pillars:
 - **DevOps + CI/CD**: code commit triggers automated build, test, deploy — minutes from change to production
 
 Cloud-native is where the architecture evolution ends: a system that automatically handles any traffic level, pays only for what it uses, and requires minimal operational intervention.
+
+---
+
+### AI-integrated write flows
+
+Modern systems increasingly involve AI API calls as part of a multi-step write flow — e.g. a user fills a form across three steps: basic info, AI-generated content, then vector DB ingestion. This introduces problems that classic CRUD never had.
+
+#### Why this is different
+
+**External cost per step**: calling an AI API costs money. Unlike a pure DB operation, there is no free rollback — if the AI call succeeds but a later step fails, the money is already spent.
+
+**Wildly uneven step latency**: step 1 is milliseconds; step 2 (AI API) may take several seconds; step 3 (vector ingestion) is also slow. Wrapping all three in a single DB transaction holds a connection and locks for the entire AI call duration — catastrophic under concurrency.
+
+A large transaction is not viable. Saga alone is insufficient — compensating SQL can delete DB records but cannot reclaim API spend.
+
+#### The core goal: detect conflicts before spending money
+
+The right framing is not "how do we roll back after a conflict" but **"how do we prevent entering step 2 if step 1 would ultimately fail."**
+
+**Pre-emptive reservation with optimistic locking**
+
+Step 1 derives a `resource_id` from the form's key business fields — only requests that are genuinely duplicates share the same key:
+
+```python
+# only blocks requests with identical username + email; all others proceed independently
+resource_id = sha256(f"{username}:{email}".encode()).hexdigest()
+```
+
+Step 1 then writes basic info and creates a `reservation` record that claims this resource:
+
+```sql
+INSERT INTO reservations (id, user_id, resource_id, status, expires_at)
+VALUES (uuid, 42, '<hash>', 'pending', now() + interval '5 minutes');
+```
+
+The `reservation` table has a partial unique index on `resource_id` scoped to active statuses:
+
+```sql
+CREATE UNIQUE INDEX idx_active_reservation
+  ON reservations(resource_id)
+  WHERE status IN ('pending', 'completed');
+```
+
+If another request with the same key fields already holds an active reservation, step 1 hits the index and fails immediately — before any AI call is made. Requests with different key fields hash to different `resource_id` values and proceed in parallel without any interference.
+
+**Soft-delete over hard-delete for compensation**
+
+Rather than deleting rows on failure, mark them with a terminal status and let a background job handle cleanup. This preserves an audit trail and keeps the compensation path to a cheap UPDATE:
+
+```
+reservation.status:  pending -> completed   (happy path)
+                             -> failed       (step 2 or 3 failed)
+                             -> expired      (background job, user abandoned mid-flow)
+```
+
+The background job runs periodically:
+
+```sql
+-- mark abandoned flows as expired
+UPDATE reservations SET status = 'expired'
+WHERE status = 'pending' AND expires_at < now();
+
+-- hard-delete after retention window (e.g. 7 days for audit)
+DELETE FROM reservations
+WHERE status IN ('failed', 'expired') AND updated_at < now() - interval '7 days';
+```
+
+The partial unique index only covers `pending` and `completed` rows, so a `failed` or `expired` reservation does not block a new attempt for the same resource.
+
+**Idempotency key on the AI call**
+
+Network timeouts on the AI API call are ambiguous — did the call execute or not? Retrying without protection may bill twice.
+
+Most AI APIs (OpenAI, Anthropic) accept an `idempotency_key`. Retrying with the same key returns the cached result without re-executing:
+
+```python
+idempotency_key = hash(user_id + session_id + "step_2")
+response = ai_client.generate(prompt, idempotency_key=idempotency_key)
+```
+
+**Saga compensation for genuine failures**
+
+If step 2 or step 3 genuinely fails after exhausting retries, run compensations in reverse — marking rows as `failed` rather than deleting them:
+
+```
+step 3 fails → mark vector entry failed (or delete if not yet committed)
+step 2 fails → mark AI result failed
+step 1 compensate → mark reservation failed, background job cleans up later
+```
+
+Compensation handles cleanup, not cost recovery. The pre-emptive reservation is what prevents unnecessary spend.
+
+#### Full flow
+
+```
+step 1: derive resource_id = hash(username + email)
+        write basic info + reservation (status=pending, expires_at=now+5min)
+        → same hash already active? reject immediately, no AI call made
+        → different hash? proceeds independently, no interference
+        → success: continue
+
+step 2: call AI API with idempotency_key
+        → timeout? retry with same key, no double billing
+        → hard failure after retries? mark reservation failed, stop
+        → success: write AI result to DB, continue
+
+step 3: ingest into vector DB
+        → failure? mark AI result + reservation failed, background job cleans up
+        → success: mark reservation completed
+
+background job (runs periodically):
+        expired pending reservations → mark expired
+        failed/expired rows past retention window → hard delete
+```
+
+See [ai_write_flow.py](ai_write_flow.py) for a runnable example.
+
+#### Workflow engines as an alternative
+
+Hand-writing the state machine and Saga compensation is tedious. Managed workflow engines — **AWS Step Functions**, **Temporal** — solve the orchestration plumbing: they persist execution state after every step, handle retries with configurable backoff, and trigger compensation branches automatically on failure. Your code becomes independent functions (Lambdas); the engine wires them together and resumes from the exact step after a crash.
+
+What the engine does not solve: the business logic inside each step — conflict detection, idempotency key generation, the reservation data model — is still your responsibility. The engine provides a durable `run_flow`; you still write the steps.
