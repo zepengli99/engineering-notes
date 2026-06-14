@@ -2262,3 +2262,130 @@ in practice these compose:
   HyDE + RAG Fusion + cross-encoder reranker
   outperforms naive RAG with modest added latency
 ```
+
+---
+
+### Scaling laws and test-time compute
+
+**The power law relationship**
+
+Model loss follows a clean power law against three variables, holding across six orders of magnitude:
+
+```
+Loss ∝ N^(-α)    N = parameter count
+Loss ∝ D^(-β)    D = training tokens
+Loss ∝ C^(-γ)    C = compute (FLOPs)
+```
+
+The practical value: trends observed on small models extrapolate reliably to large ones. You do not need to train a GPT-4-scale model to predict its approximate loss — fit the curve at small scale and read off the answer.
+
+**Kaplan (2020) vs Chinchilla (2022)**
+
+Kaplan found that given a fixed compute budget, most of it should go to model size: scale parameters faster than data. GPT-3 (175B parameters, ~300B tokens) followed this principle.
+
+DeepMind's Chinchilla experiment showed Kaplan's models were systematically undertrained. The corrected optimal ratio:
+
+```
+tokens ≈ 20 × parameters
+
+70B parameter model → 1.4T tokens optimal
+175B parameter model → 3.5T tokens optimal
+
+GPT-3 actual training data: ~300B tokens
+GPT-3 Chinchilla-optimal:   ~3.5T tokens
+→ GPT-3 trained on less than 10% of the optimal data for its size
+```
+
+Chinchilla (70B, 1.4T tokens) matched or exceeded GPT-3 (175B) at equal compute. The LLaMA series applied this principle: smaller models trained on far more data, better inference cost at equivalent quality.
+
+**Emergent abilities**
+
+Some capabilities appear discontinuously at scale thresholds rather than improving smoothly:
+
+```
+chain-of-thought reasoning:  near-zero below ~10B params, significant above ~100B
+in-context learning, arithmetic, cross-lingual transfer: similar threshold behaviour
+```
+
+One explanation: a capability requires multiple sub-capabilities each growing smoothly; the task only becomes solvable when all sub-capabilities simultaneously exceed their individual thresholds — appearing as a step function in aggregate evaluation.
+
+**The data wall**
+
+Chinchilla demands more tokens per parameter, but high-quality human-written text is finite. Estimates put the usable English internet corpus at 10–100T tokens; frontier models are already consuming the majority of it. Responses: synthetic data generation (stronger models produce training data for weaker ones), multimodal data (video is the next large reservoir), and multi-epoch training with diminishing returns.
+
+**Test-time compute scaling**
+
+A second scaling axis, independent of training: allocating more compute at inference time improves performance on the same model.
+
+```
+traditional scaling axis:   training FLOPs → bigger model → lower loss
+test-time scaling axis:     inference FLOPs → more reasoning → better answers
+```
+
+The mechanism is externalising working memory into the context window. A transformer's working memory during a forward pass is limited to what fits in the residual stream. Complex multi-step problems exceed this capacity. Generating intermediate reasoning steps as tokens makes those steps available as context for subsequent tokens — each step attends to all prior steps rather than compressing everything through the residual:
+
+```
+without thinking tokens:
+  model must compress all 10 reasoning steps through one forward pass
+  intermediate results compete for space in the residual stream
+
+with thinking tokens:
+  step 1 written as tokens → stored in KV cache
+  step 2 attends to step 1 explicitly
+  step 3 attends to steps 1 and 2
+  ...
+  working memory scales with context window, not residual dimension
+```
+
+Additional capabilities enabled: backtracking ("wait, I made an error above"), problem decomposition, and multi-path exploration.
+
+**How thinking models are trained (DeepSeek-R1)**
+
+R1 applied pure reinforcement learning (GRPO) with a single reward signal: final answer correctness. No human-designed reasoning templates. Two emergent behaviours appeared spontaneously during training: longer reasoning chains for harder problems, and self-correction ("actually, my assumption above was wrong"). The model discovered that backtracking raises the probability of a correct answer and therefore raises reward — the behaviour reinforced itself. A subsequent distillation phase fine-tuned smaller models on R1's reasoning traces.
+
+**Thinking tokens and KV cache lifecycle**
+
+During generation, thinking tokens are full participants in the KV cache. Output tokens attend to all preceding thinking tokens at every layer — this is what makes the output informed by the reasoning:
+
+```
+x_out^(l) = x_out^(l-1) + Attention(Q_out, {K_j : j ≤ position}, {V_j : j ≤ position})
+                                                  includes all thinking token K/V
+```
+
+After the turn completes, the conversation history carries only `[system][user][output]` — thinking tokens are discarded. The next turn's prefill recomputes KV cache for this shorter sequence; output tokens' KV values are recomputed without thinking token context.
+
+Two facts about information preservation:
+
+```
+prompt token KV cache:
+  prompt tokens precede thinking tokens in the sequence
+  causal masking prevents them from attending to thinking tokens
+  → prompt KV values are unaffected by thinking tokens
+  → no information loss when thinking tokens are discarded
+
+output token KV cache:
+  output tokens were generated after thinking tokens and attended to them
+  their layer representations encoded thinking token information
+  → those exact KV values are NOT reused next turn (sequence structure changed)
+  → recomputed without thinking context — representations become "poorer"
+
+the information thinking produced is preserved via a different channel:
+  thinking shaped which words were chosen for the output
+  the output text itself carries the compressed conclusions forward
+  if the output text is too terse, that reasoning context is genuinely lost
+```
+
+**Forms of test-time scaling**
+
+```
+longer thinking:      more token budget before answering; "Wait" token forcing (s1)
+best-of-N:            generate N independent answers, score with reward model, take best
+majority voting:      generate N answers, return most frequent (effective for exact-answer tasks)
+MCTS:                 model reasoning as a tree; process reward model scores each step;
+                      backtrack on dead ends — highest ceiling, highest cost
+
+combined scaling:
+  model capability = f(training compute) × g(inference compute)
+  a 70B model with 10 000 thinking tokens can outperform a larger dense model
+  on mathematical reasoning with no thinking budget
+```
