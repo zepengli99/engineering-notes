@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  replicas: 2                  # desired state: keep 2 Pods alive at all times
+  selector:
+    matchLabels:
+      app: nginx               # this Deployment owns all Pods with this label
+  template:                    # Pod blueprint used to create new Pods
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80

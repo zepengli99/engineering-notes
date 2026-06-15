@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: myapp
+          image: busybox
+          command: ["sh", "-c", "env | grep -E 'DB_|APP_' && sleep 3600"]
+          envFrom:
+            - configMapRef:
+                name: app-config    # load all keys from ConfigMap as env vars

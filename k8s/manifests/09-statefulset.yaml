@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+spec:
+  serviceName: db
+  replicas: 2
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+        - name: db
+          image: busybox
+          command: ["sh", "-c", "mkdir -p /data && sleep 3600"]
+          volumeMounts:
+            - name: data
+              mountPath: /data       # persistent disk mounted here
+  volumeClaimTemplates:              # each Pod gets its OWN PVC automatically
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Mi

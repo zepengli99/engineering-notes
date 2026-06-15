@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  DB_HOST: "postgres.internal"
+  DB_PORT: "5432"
+  APP_ENV: "staging"
