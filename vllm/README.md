@@ -189,8 +189,69 @@ single-request throughput:    81.8 tok/s
 ```
 
 TTFT and TBT are independent axes of latency. A long prompt increases TTFT (more prefill work)
-without affecting TBT. A loaded server increases TBT (decode steps are shared across requests)
-without necessarily affecting TTFT.
+without affecting TBT. A loaded server increases TBT for three reasons:
+
+1. **Larger batch = more compute per step.** Each decode step processes N sequences in parallel.
+   Attention and FFN compute scales with batch size — each step takes longer, TBT rises.
+
+2. **Larger batch = more KV cache reads.** N sequences means N sets of KV vectors to read from
+   VRAM. This compounds with the compute increase above.
+
+3. **Preemption spikes.** When the block pool fills, the scheduler evicts a sequence. That
+   sequence produces no token for several steps (until re-admitted and re-prefilled). From the
+   client's perspective, TBT shows a sudden spike for that request.
+
+**Which is the real bottleneck: HBM reads or compute?**
+
+It depends on batch size — there is a crossover point:
+
+```
+small batch (1–few requests)
+  weights are ~3 GB, HBM bandwidth ~400 GB/s → reading weights takes ~7 ms
+  compute scales with batch size, but at batch=1 the GPU is mostly idle waiting for data
+  → bandwidth-bound: adding more requests barely increases TBT, throughput rises sharply
+
+large batch (tens of requests)
+  matrix operations for N sequences × (attention + FFN) start to saturate GPU compute
+  KV cache reads (N × hundreds of KB) also accumulate
+  → compute-bound: adding more requests directly increases TBT
+
+crossover (sweet spot)
+  vLLM's scheduler aims to keep batch size near this point — GPU neither starving for
+  data nor overloaded with compute
+```
+
+At our 1.5B model with batch=8, TBT=12ms vs weight-read time ~7ms — sitting in the
+transition zone between the two regimes.
+
+**KV cache reads as a third bottleneck axis**
+
+Each decode step, attention must read the full KV cache for every sequence — all historical
+K and V vectors — to compute the dot product with the current Q. KV cache read volume grows
+linearly with sequence length.
+
+```
+model weights:   fixed ~3 GB  (1.5B model, does not grow)
+KV cache:        ~tens of KB per token × sequence length × batch size
+```
+
+At short sequences (hundreds of tokens), KV cache reads are negligible next to weight reads.
+At long sequences (thousands of tokens, e.g. 32k context), KV cache reads can exceed the
+weight reads and become the dominant HBM bottleneck for the attention operation specifically.
+
+This is one of the core motivations for FlashAttention — it reorders the attention computation
+into tiles that fit in SRAM, reducing the number of HBM round-trips for Q/K/V from O(n²) to
+O(n). The bottleneck it targets is exactly KV cache HBM bandwidth at long context.
+
+The full picture across all three axes:
+
+```
+short sequence + small batch:  weight HBM reads dominate
+long sequence:                 KV cache HBM reads compete with weights
+large batch:                   compute saturates the GPU
+
+real workloads sit somewhere across these three dimensions simultaneously
+```
 
 ---
 
@@ -238,6 +299,27 @@ APIServer  pid=1    INFO  Application startup complete.
 ```
 
 The analogy to web infrastructure: APIServer + EngineCore is the same separation as Nginx (accepts connections) + Gunicorn worker (runs application code). The worker can block; the frontend never does.
+
+### Why `run_in_executor` is not the answer
+
+A common workaround for blocking code in asyncio is `run_in_executor` — push the blocking call to a thread pool so the event loop stays free:
+
+```python
+result = await loop.run_in_executor(None, model, input)
+```
+
+This does fix the event loop problem. But it does not fix GPU utilisation.
+
+Each request in the thread pool calls `model(input)` independently with batch size 1. The GPU must read all model weights from VRAM once per forward pass — whether batch size is 1 or 10, the weight read cost is identical. With 10 concurrent requests:
+
+```
+run_in_executor:  10 forward passes, batch=1 each  →  weights read 10 times
+vLLM:             1 forward pass,    batch=10       →  weights read once, cost amortised 10x
+```
+
+Decode is memory-bandwidth-bound (see LLM Architecture notes). Weight reads are the bottleneck. Batching amortises that cost across N requests — `run_in_executor` pays it N times.
+
+This is also the same principle as the `time.sleep` blocking example in the [concurrency notes](../concurrency/README.md): `cudaDeviceSynchronize()` and `time.sleep` both block the calling thread from inside the event loop. The mechanism is identical — only what they are waiting for differs (GPU vs clock).
 
 ---
 
