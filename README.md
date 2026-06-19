@@ -14,6 +14,8 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 | 🏛️ | [System Design](system_design/) | Architecture evolution, CDN, reverse proxy, NoSQL, read/write split |
 | 🤖 | [LLM Architecture](llm_architecture/) | GPU vs CPU constraints, VRAM, model parallelism, KV cache, inference scaling |
 | ☸️ | [Kubernetes](k8s/) | Pod, Deployment, Service, Ingress, ConfigMap, StatefulSet, PV — from pain points |
+| 🤗 | [Hugging Face](huggingface/) | Hub CLI, local cache structure, downloading models and datasets |
+| ⚡ | [vLLM](vllm/) | PagedAttention, KV cache block allocator, continuous batching, preemption, process architecture |
 
 More topics added over time.
 
