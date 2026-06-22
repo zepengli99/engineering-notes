@@ -16,6 +16,8 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 | ☸️ | [Kubernetes](k8s/) | Pod, Deployment, Service, Ingress, ConfigMap, StatefulSet, PV — from pain points |
 | 🤗 | [Hugging Face](huggingface/) | Hub CLI, local cache structure, downloading models and datasets |
 | ⚡ | [vLLM](vllm/) | PagedAttention, KV cache block allocator, continuous batching, preemption, process architecture |
+| 🔗 | [LangChain](langchain/) | LCEL, Runnable, tools, tool calling protocol, with_structured_output |
+| 🕸️ | [LangGraph](langgraph/) | StateGraph, checkpointing, human-in-the-loop, multi-agent, Send API |
 
 More topics added over time.
 

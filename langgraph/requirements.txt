@@ -1,0 +1,4 @@
+langchain-groq
+langgraph
+python-dotenv
+yt-dlp

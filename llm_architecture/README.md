@@ -1958,7 +1958,7 @@ result: syntactically valid JSON is guaranteed by construction, not by prompt
 
 More expressive constraints use BNF grammars (context-free), which can express any JSON Schema, XML structure, or custom format. Tools: **Outlines**, **guidance**, vLLM's native grammar sampling.
 
-The engineering impact: agent code can call `result.tool_name` directly rather than wrapping every step in try/except parse-and-retry logic. Reliability goes from ~90% to ~100%. The agent chapters cover practical usage (Pydantic + Instructor pattern) in more detail.
+The engineering impact: agent code can call `result.tool_name` directly rather than wrapping every step in try/except parse-and-retry logic. Reliability goes from ~90% to ~100%. Practical usage (Pydantic + Instructor pattern for smart retry) is covered in [LangGraph notes](../langgraph/README.md#structured-output-and-the-instructor-pattern).
 
 ---
 
