@@ -1262,7 +1262,10 @@ MCP server exposes three capability types:
   Prompts:   reusable templates triggered from the client UI
 ```
 
-Communication uses JSON-RPC over stdio (local) or HTTP + SSE (remote).
+Two transport mechanisms depending on where the server runs:
+
+- **stdio (local)** — client spawns the MCP server as a subprocess, communicates via stdin/stdout. No network overhead. Used for local tools: filesystem, local databases, CLI scripts.
+- **HTTP + SSE (remote)** — server runs anywhere; client sends HTTP requests, responses stream back via SSE. Used for cloud-hosted services.
 
 **Agent Skills**
 
