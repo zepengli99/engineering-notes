@@ -2265,6 +2265,80 @@ in practice these compose:
 
 ---
 
+### CAG: cache-augmented generation
+
+RAG's core bet is that retrieval can identify the relevant fraction of a knowledge base accurately enough that the LLM never needs to see the rest. CAG makes the opposite bet: load everything into the context upfront, skip retrieval entirely.
+
+The mechanism is KV cache prefix caching. During setup, the full knowledge base is fed to the model as a prefill, and the resulting KV cache is saved to disk. At query time, those cached KV values are restored directly into VRAM — no vector search, no reranking, no chunking decisions, no retrieval misses.
+
+```
+RAG per-request:
+  user query
+    ↓ embed query → ANN search → rerank → inject top-k chunks
+    ↓ prefill (system + chunks + query)
+    ↓ decode
+
+CAG per-request:
+  user query
+    ↓ load saved KV cache for the knowledge base into VRAM
+    ↓ prefill (query only, short)
+    ↓ decode
+```
+
+The full knowledge base is visible at every attention layer for every generation step. Nothing is filtered out before the LLM sees it — which eliminates the failure mode where the retriever returns slightly wrong chunks and the model answers confidently from bad evidence.
+
+**The hard constraint: it must fit in the context window**
+
+CAG requires the entire knowledge base to fit in the model's context window. At 128k tokens that is roughly 250 pages of text — enough for a single product's documentation, an internal policy handbook, or a codebase's core files. Not enough for an enterprise knowledge base or anything that grows unboundedly.
+
+There is also a VRAM cost at serving time:
+
+```
+LLaMA-3-70B, 128k-token knowledge base:
+  KV cache ≈ 80 layers × 8 KV heads × 128 d_head × 128000 × 2 bytes × 2 (K+V) ≈ 42 GB
+
+this is per request that needs the full context loaded
+→ A100 80GB with 35GB model weights: ~45GB left → just fits one copy
+→ PagedAttention ref-counting lets multiple requests share the same KV blocks
+  if they use an identical knowledge base prefix, partially recovering concurrency
+```
+
+**RAG vs CAG**
+
+```
+CAG:
+  simpler pipeline — no vector DB, no embedding model, no chunking tuning
+  no retrieval errors — "needle in haystack" queries answered correctly
+  full cross-document attention — model can synthesise across the whole base
+  ceiling: context window hard limit, high per-request VRAM footprint
+
+RAG:
+  scales to millions of documents — no context window ceiling
+  lower per-request VRAM — only retrieved chunks in context
+  ceiling: retrieval quality — wrong chunks → wrong answer
+```
+
+**When to use CAG**
+
+CAG is fundamentally a read-heavy, write-light workload. The KV cache is a pre-computed artefact: cheap to read on every request, expensive to rebuild. Unlike RAG — where updating a document means re-embedding just that document's chunks — updating the knowledge base in CAG requires a full rebuild of the entire KV cache. A single changed sentence forces a complete re-prefill.
+
+```
+knowledge base size:
+  < 50k tokens:    CAG — simpler and more reliable
+  50k–300k tokens: depends on model context length; test retrieval precision
+  > 300k tokens:   RAG required
+
+update frequency:
+  updated daily or more:   RAG — only re-embed changed chunks
+  updated weekly or less:  CAG viable — rebuild cost amortises over many requests
+
+content characteristics:
+  high cost of retrieval miss (legal, compliance, exact-match):  prefer CAG
+  broad knowledge base, latency and cost dominate:              prefer RAG
+```
+
+---
+
 ### Scaling laws and test-time compute
 
 **The power law relationship**
