@@ -4,6 +4,21 @@ LangGraph is the orchestration layer for LLM agents. Where [LangChain](../langch
 
 The core insight: **an agent is a state machine**. The ReAct loop that AgentExecutor hid in a black box is just a graph with two nodes and a conditional edge. LangGraph makes that explicit.
 
+## Code examples
+
+| File | What it demonstrates |
+|---|---|
+| [01_manual_loop.py](01_manual_loop.py) | Hand-written ReAct loop — no LangGraph, shows the raw tool-calling cycle |
+| [02_simple_agent.py](02_simple_agent.py) | Same loop rewritten as a LangGraph StateGraph |
+| [03_checkpointing.py](03_checkpointing.py) | MemorySaver, thread_id, multi-turn conversation |
+| [04_human_in_the_loop.py](04_human_in_the_loop.py) | `interrupt()` and `Command(resume=...)` |
+| [05_multi_agent.py](05_multi_agent.py) | Supervisor pattern with two worker subgraphs, `with_structured_output` |
+| [06_streaming.py](06_streaming.py) | Event stream vs token stream |
+| [07_error_handling.py](07_error_handling.py) | `handle_tool_errors`, max iterations guard |
+| [08_observability.py](08_observability.py) | LangSmith tracing, stream-based local logging |
+| [09_send_api.py](09_send_api.py) | Parallel fan-out with `Send`, custom reducers |
+| [10_react_vs_plan.py](10_react_vs_plan.py) | ReAct vs Plan-and-Execute, LLM call count comparison |
+
 ---
 
 ## Core concepts
