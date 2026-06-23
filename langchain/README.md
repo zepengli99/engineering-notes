@@ -138,3 +138,36 @@ Skipping the `ToolMessage` is a protocol violation — the Anthropic API returns
 The model may call tools across multiple turns. After receiving tool results, it might call another tool before giving a final answer. Maintaining the message list, matching `tool_call_id`s, and deciding when to stop all adds up fast.
 
 This is exactly what LangGraph handles — it models the loop as an explicit graph so you define the logic once rather than writing it by hand each time.
+
+### Tool result caching
+
+Tool calls can be expensive — hitting external APIs, querying databases. If many users ask about the same city's weather, there's no reason to call the API every time.
+
+Cache at the implementation level, not the LangChain level. `@tool` can't use `@lru_cache` directly (LangChain wraps the function), so extract the actual work into a separate cached function:
+
+```python
+import time
+from functools import lru_cache
+from langchain_core.tools import tool
+
+# Simple in-memory cache with TTL
+_cache: dict = {}
+CACHE_TTL = 300  # 5 minutes
+
+def _fetch_weather(city: str) -> str:
+    key = city.lower()
+    if key in _cache:
+        result, ts = _cache[key]
+        if time.time() - ts < CACHE_TTL:
+            return result
+    result = call_weather_api(city)   # the real API call
+    _cache[key] = (result, time.time())
+    return result
+
+@tool
+def get_weather(city: str) -> str:
+    """Get current weather for a city."""
+    return _fetch_weather(city)
+```
+
+For multi-process deployments (multiple workers), use Redis instead of an in-memory dict so all workers share the same cache. The pattern is identical to any other API caching — tool calls are just function calls.
