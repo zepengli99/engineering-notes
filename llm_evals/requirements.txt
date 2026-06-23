@@ -1,0 +1,5 @@
+langchain-groq
+sentence-transformers
+faiss-cpu
+python-dotenv
+numpy
