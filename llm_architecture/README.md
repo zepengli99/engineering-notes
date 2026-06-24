@@ -423,6 +423,16 @@ GQA (Grouped Query Attention): Q=64, K= 8, V= 8  → near-MHA quality, 8× small
 MQA (Multi-Query Attention):   Q=64, K= 1, V= 1  → smallest cache, slight quality drop
 ```
 
+**MLA (Multi-head Latent Attention)** — DeepSeek-V2's approach. Instead of caching K and V directly, the model compresses them into a single low-rank latent vector `c_KV` via a learned down-projection. At inference, K and V are reconstructed from `c_KV` as needed; only `c_KV` is stored in the KV cache.
+
+```
+MHA: cache  K [d_model × n_heads]  +  V [d_model × n_heads]  per token  → largest
+GQA: cache  K [d_model × n_kv]    +  V [d_model × n_kv]     per token  → smaller
+MLA: cache  c_KV [d_c]  where d_c << d_model × n_heads        per token  → smallest
+```
+
+The trade-off: reconstruction adds compute at inference time, but KV cache size shrinks dramatically — enabling much longer effective context at the same VRAM budget.
+
 ---
 
 ### Pre-training
@@ -1855,6 +1865,17 @@ FlashAttention:
 ```
 
 FlashAttention is the infrastructure that makes long context possible. Without it, a 128k-token attention pass requires 32 GB just for intermediate variables — before counting model weights or KV cache.
+
+**Sparse attention**
+
+FlashAttention reduces the *memory* cost of long-context attention but not the *arithmetic* cost — computing all N×N attention scores still scales as O(N²). Sparse attention addresses this by only computing attention between a selected subset of token pairs rather than all pairs.
+
+The core observation: most meaningful dependencies in language are either local (nearby tokens) or structured (a few globally important tokens). A typical pattern combines:
+
+- **Local window** — each token attends to the W nearest tokens. Covers short-range syntax and semantics at O(N·W) cost.
+- **Global tokens** — a small set of designated tokens attend to the full sequence and are attended to by all tokens. These carry global context that the local window cannot reach.
+
+Sparse attention and FlashAttention are orthogonal: FlashAttention is an IO optimisation that can be applied to any attention pattern, sparse or dense. Sparse attention and GQA/MLA are also orthogonal: GQA/MLA reduce KV cache *size*; sparse attention reduces the *number of token pairs computed*. Modern long-context models often combine all three.
 
 **Long context in practice: the engineering constraints**
 

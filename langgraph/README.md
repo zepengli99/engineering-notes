@@ -1,6 +1,8 @@
 # LangGraph
 
-LangGraph is the orchestration layer for LLM agents. Where [LangChain](../langchain/README.md) supplies components (models, tools, prompts), LangGraph defines how they run — the control flow, state management, and execution loop.
+LangGraph is the harness layer for LLM agents. The model handles reasoning; the harness handles everything around it — assembling context, executing tools, managing state, enforcing constraints. Most agent engineering work happens in the harness, not the model.
+
+Where [LangChain](../langchain/README.md) supplies components (models, tools, prompts), LangGraph defines how they run — the control flow, state management, and execution loop.
 
 The core insight: **an agent is a state machine**. The ReAct loop that AgentExecutor hid in a black box is just a graph with two nodes and a conditional edge. LangGraph makes that explicit.
 
@@ -68,6 +70,8 @@ def should_continue(state: MessagesState):
         return "tools"
     return END
 ```
+
+`return END` means the model's turn ended with no pending tool calls — not that the user's goal is satisfied. The model may have returned a clarifying question or a partial result. If goal completion matters, the harness needs an explicit check beyond the absence of tool calls.
 
 ---
 
@@ -236,6 +240,28 @@ LangGraph saves a checkpoint after each completed node. When `interrupt()` fires
 - `approve_node` has not completed yet
 
 On resume, `approve_node` re-executes from the top — but `interrupt()` returns the resume value immediately instead of pausing again.
+
+### Keep interrupt nodes atomic
+
+Because the interrupt node re-runs on resume, any code before `interrupt()` executes twice. Put expensive work (LLM calls, API calls) in a preceding node so results land in State before the interrupt node runs.
+
+```python
+# correct — draft_node does the heavy work, approve_node just reads State
+def draft_node(state):
+    response = model.invoke(state["messages"])   # runs once
+    return {"messages": [response]}
+
+def approve_node(state):
+    draft = state["messages"][-1].content        # read from State, no recomputation
+    decision = interrupt(f"Draft: {draft}\nProceed?")
+    ...
+
+# wrong — model called twice (once before pause, once on resume)
+def approve_node(state):
+    draft = model.invoke(state["messages"])      # runs twice
+    decision = interrupt(f"Draft: {draft}\nProceed?")
+    ...
+```
 
 ---
 
@@ -511,6 +537,17 @@ def should_continue(state: State):
 
 The guard fires when `steps` reaches the limit regardless of what the model wants to do next. Without it, a tool that always returns "still running" will run the agent until the context window fills up or the API bill explodes.
 
+### Stuck loop detection
+
+Iteration cap is a quantity guard — it fires after N steps regardless of what happened. A complementary check catches a different failure: the agent repeating the same action without progress.
+
+The signal is tool call repetition: the agent invokes the same tool with identical arguments on consecutive iterations. This is not work — it is a stall. A well-instrumented harness tracks recent calls, detects the pattern, and exits early rather than burning the remaining iterations on a stuck run. Oscillation between two states belongs to the same family.
+
+Two stop conditions, different concerns:
+
+- **Iteration cap** — fires after N steps regardless of content
+- **Repetition detection** — fires when the agent stops making progress
+
 ---
 
 ## Observability
@@ -620,261 +657,6 @@ Send API (parallel):      dispatcher → A ──┐
                                       → C ──┘
 
 wall-clock time:
-  sequential: time(A) + time(B) + time(C)
-  parallel:   max(time(A), time(B), time(C))
-```
-
----
-
-### Keep interrupt nodes atomic
-
-Because the interrupt node re-runs on resume, any code before `interrupt()` executes twice. Put expensive work (LLM calls, API calls) in a preceding node so results land in State before the interrupt node runs.
-
-```python
-# correct — draft_node does the heavy work, approve_node just reads State
-def draft_node(state):
-    response = model.invoke(state["messages"])   # runs once
-    return {"messages": [response]}
-
-def approve_node(state):
-    draft = state["messages"][-1].content        # read from State, no recomputation
-    decision = interrupt(f"Draft: {draft}\nProceed?")
-    ...
-
-# wrong — model called twice (once before pause, once on resume)
-def approve_node(state):
-    draft = model.invoke(state["messages"])      # runs twice
-    decision = interrupt(f"Draft: {draft}\nProceed?")
-    ...
-```
-
----
-
-## Custom State
-
-`MessagesState` is a shortcut. For anything beyond a message list, define your own `TypedDict`:
-
-```python
-from typing import Annotated
-from typing_extensions import TypedDict
-from langgraph.graph.message import add_messages
-
-class State(TypedDict):
-    messages: Annotated[list, add_messages]  # append reducer
-    steps:    int                            # replace reducer (default)
-    next:     str                            # replace reducer (default)
-    user_id:  str                            # set once, passed through
-    summary:  str                            # updated by summarise node
-```
-
-### Reducers
-
-Every State field has a reducer defining how a node's returned value merges with the existing value. Default is **replace** (last write wins). `add_messages` is a built-in reducer that appends instead.
-
-Write your own:
-
-```python
-def add_int(existing: int, new: int) -> int:
-    return existing + new
-
-class State(TypedDict):
-    steps: Annotated[int, add_int]  # returns delta, reducer accumulates
-```
-
-With `add_int`, a node returns `{"steps": 1}` instead of `{"steps": state["steps"] + 1}`.
-
-### Why reducers matter in parallel execution
-
-In a sequential graph the two styles are equivalent. In parallel fan-out, manual increment causes a race condition:
-
-```
-node_A reads steps=3, returns {"steps": 4}
-node_B reads steps=3, returns {"steps": 4}
-→ one increment is lost, result is 4 instead of 5
-```
-
-With a reducer each node returns its delta and LangGraph applies them both correctly.
-
-### messages vs State fields
-
-**messages** — for the LLM's context window: conversation history, tool calls, tool results.
-
-**State fields** — for application logic: routing decisions, counters, metadata, intermediate results. The model never sees them directly. Don't put `user_id`, `next`, or `steps` in messages.
-
----
-
-## Error handling
-
-### Tool failures
-
-`handle_tool_errors=True` catches exceptions and wraps them as `ToolMessage` so the model can recover instead of crashing the graph:
-
-```python
-tool_node = ToolNode(tools, handle_tool_errors=True)
-```
-
-The model receives:
-
-```
-ToolMessage(content="Error: ZeroDivisionError('Cannot divide by zero.') Please fix your mistakes.")
-```
-
-Pass a function for custom error formatting:
-
-```python
-def format_error(error: Exception) -> str:
-    return f"Tool failed ({type(error).__name__}): {error}"
-
-ToolNode(tools, handle_tool_errors=format_error)
-```
-
-### Max iterations guard
-
-Add a `steps` counter to State and force `END` when it hits the limit:
-
-```python
-class State(TypedDict):
-    messages: Annotated[list, add_messages]
-    steps: int
-
-def agent_node(state: State):
-    response = model_with_tools.invoke(state["messages"])
-    return {"messages": [response], "steps": state["steps"] + 1}
-
-def should_continue(state: State):
-    if state["steps"] >= 10:
-        return END
-    if state["messages"][-1].tool_calls:
-        return "tools"
-    return END
-```
-
-Without it, a tool that always returns "still running" will loop until the context window fills up or the API bill explodes.
-
----
-
-## Streaming
-
-Two modes solving different problems.
-
-### Mode 1: stream graph events
-
-`app.stream()` yields one chunk per completed node. Use for progress updates.
-
-```python
-for chunk in app.stream({"messages": [HumanMessage("...")]}):
-    node_name = list(chunk.keys())[0]
-    messages = chunk[node_name]["messages"]
-    print(f"[{node_name}] {messages[-1].content[:80]}")
-```
-
-### Mode 2: stream tokens
-
-`stream_mode="messages"` yields one chunk per token. Use for typewriter-style UI output.
-
-```python
-for chunk, metadata in app.stream(
-    {"messages": [HumanMessage("...")]},
-    stream_mode="messages",
-):
-    if (
-        metadata.get("langgraph_node") == "agent"
-        and hasattr(chunk, "content")
-        and chunk.content
-    ):
-        print(chunk.content, end="", flush=True)
-```
-
-Filter by `langgraph_node` to skip `ToolMessage` chunks.
-
----
-
-## Observability
-
-### LangSmith
-
-Set three env vars — every `invoke()` automatically uploads a trace:
-
-```
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=ls__your_key_here   # free tier at smith.langchain.com
-LANGCHAIN_PROJECT=my-agent
-```
-
-Add metadata via `config` for filtering in the UI:
-
-```python
-app.invoke(
-    {"messages": [HumanMessage("...")]},
-    config={
-        "run_name": "weather-query",
-        "tags": ["prod"],
-        "metadata": {"user_id": "u-123"},
-    },
-)
-```
-
-### Stream-based local logging
-
-No external service. `stream_mode="updates"` yields one dict per node completion:
-
-```python
-for chunk in app.stream(input, stream_mode="updates"):
-    for node_name, update in chunk.items():
-        for m in update.get("messages", []):
-            print(f"[{node_name}] {type(m).__name__}: {m.content[:80]}")
-```
-
----
-
-## Send API — parallel fan-out
-
-`Send` dispatches multiple tasks simultaneously. All branches run in parallel; an aggregate node collects results after all complete.
-
-```python
-from langgraph.types import Send
-
-def dispatch(state: OverallState):
-    return [Send("research", {"city": city}) for city in state["cities"]]
-```
-
-### State design for fan-out
-
-```python
-def append_result(existing: list, new) -> list:
-    if isinstance(new, list):
-        return existing + new   # handles initial state setup
-    return existing + [new]     # appends a single result
-
-class OverallState(TypedDict):
-    cities:  list[str]
-    results: Annotated[list, append_result]
-    summary: str
-```
-
-### Graph wiring
-
-```python
-graph.add_conditional_edges(START, dispatch)   # fan-out
-graph.add_edge("research", "aggregate")        # all branches converge
-graph.add_edge("aggregate", END)
-```
-
-### Common pitfalls
-
-**Reducer called on initialisation** — handle both `list` and single-item inputs in the reducer.
-
-**Result order is not guaranteed** — parallel branches finish in arbitrary order; sort in the aggregate node if order matters.
-
-### Sequential vs parallel
-
-```
-Supervisor (sequential):  dispatcher → A → dispatcher → B → END
-Send API (parallel):      dispatcher → A ──┐
-                                      → B ──┼── aggregate → END
-                                      → C ──┘
-
-wall-clock:
   sequential: time(A) + time(B) + time(C)
   parallel:   max(time(A), time(B), time(C))
 ```

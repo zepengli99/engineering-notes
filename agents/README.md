@@ -107,6 +107,28 @@ Agents need different kinds of memory for different purposes. Three layers, each
 
 Semantic memory is covered in [LLM Architecture → RAG](../llm_architecture/README.md) — embeddings, vector databases, chunking, reranking, and the full retrieval pipeline.
 
+### Memory-augmented vs memory-aware
+
+Not all agents relate to their memory the same way.
+
+A **memory-augmented** agent reads from memory and injects it into context. Memory is something that happens to the agent — the harness loads it, the agent uses it passively.
+
+A **memory-aware** agent actively manages its own cognitive state: deciding what to retrieve, when to store, and what to forget. Memory is a first-class concern, not an ambient layer.
+
+The practical difference is an architectural question: **for each memory operation, who decides when it runs?**
+
+| Operation | Controlled by | Why |
+|---|---|---|
+| Load conversation history | Harness (automatic) | Always needed — agent can't function without it |
+| Load policy / preferences | Harness (automatic) | Always applies — scope is fixed, not query-dependent |
+| Search knowledge base | Harness (per query) | Runs each turn but parameterised by current input |
+| Retrieve past episodes | Harness (per query) | Relevance depends on the current task |
+| Search the web | Agent (triggered) | Model decides when stored knowledge is insufficient |
+| Summarise context | Agent (triggered) | Model decides when context needs compaction |
+| Expand a summary | Agent (triggered) | Model decides when full detail is needed |
+
+Harness-automatic operations form the **baseline context** that always applies. Agent-triggered operations are **discretionary retrieval** the model invokes when it judges it's needed. A well-designed agent has both.
+
 ### Episodic Memory
 
 Stores past agent runs so future runs can avoid repeated mistakes.
@@ -383,6 +405,27 @@ if remaining < 0:
 | Token budget | Low | Local to one request, use API usage field |
 | Model routing | Medium | Routing logic simple; dynamic mid-task routing is harder |
 | Budget cap | High | Distributed concurrent updates, requires atomic ops |
+
+### Context management
+
+In a long-running agent loop, tool outputs accumulate in context across iterations. A single web search can return thousands of tokens — and those tokens stay in context for every subsequent loop iteration, whether the model needs them or not.
+
+**Tool output offloading** addresses this: persist the full output to a log, and return only a compact reference to the model. The model calls a retrieval tool if it genuinely needs the full content again.
+
+```python
+def execute_tool(tool_name, tool_args, thread_id):
+    raw_output = run_tool(tool_name, tool_args)
+    log_id = tool_log.write(thread_id, tool_name, raw_output)
+    return f"[Tool Log ID: {log_id}] Stored. Call read_tool_log({log_id}) to retrieve."
+```
+
+The compact reference keeps the context lean. Retrieval is agent-triggered — the model decides when the full content is worth pulling back in. Most of the time, it isn't.
+
+This pattern is only worth the complexity when the loop runs many iterations with large tool outputs. For short agents with small results, the overhead outweighs the benefit.
+
+For context growth from conversation history rather than tool outputs, the strategies are sliding window and summarisation — covered in [LangGraph → Checkpointing](../langgraph/README.md#checkpointing).
+
+The model's attention architecture also determines how gracefully it handles long agent loops. MHA caches full K and V matrices for every head — KV cache grows linearly with context. GQA shares K/V heads across query groups, shrinking the cache proportionally. MLA (DeepSeek) compresses K and V into a low-rank latent vector, cutting cache size further. Sparse attention reduces the arithmetic cost by only computing attention between a selected subset of token pairs rather than all N×N pairs. Modern long-context models often combine several of these. See [LLM Architecture → Long context](../llm_architecture/README.md#long-context-rope-and-flashattention).
 
 ### Permission isolation
 
@@ -741,7 +784,8 @@ The content differs (Policy = constraints, Skills = procedures) but the storage 
 
 ### Two retrieval paths, not one
 
-Every turn runs two fundamentally different retrieval operations.
+Every turn runs two fundamentally different retrieval operations. Path A is the harness-automatic baseline (fixed scope, always runs); Path B is harness-run per query (dynamic scope, parameterised by current input). Agent-triggered operations — web search, summarisation, summary expansion — sit above both, invoked by the model's own tool calls.
+
 
 **Path A — Known-scope lookup (Policy + Preference)**
 
