@@ -695,3 +695,208 @@ Each box corresponds to a section above. The flow:
 4. **LLM API** calls use retry + circuit breaker
 5. All state lives in **Persistence** — checkpoints survive worker crashes, budget state is consistent
 6. Everything flows into **Observability** — traces, metrics, continuous evaluation
+
+---
+
+## Stateful Memory Architecture
+
+> Source: [From RAG to Memory Systems: Building Stateful AI Architecture](https://blogs.oracle.com/developers/from-rag-to-memory-systems-building-stateful-ai-architecture) — Jeremy Daly. Notes below extend the article with insights from working through the concepts.
+
+### RAG is not memory
+
+RAG retrieves from a fixed corpus. Nothing the model says or does flows back into the corpus — it is stateless by design. Memory adds a write path: observations from a run can be promoted into durable storage and retrieved in future sessions.
+
+The distinction matters in practice. A RAG system forgets everything between sessions. A user who says "I prefer JSON responses" on Monday gets natural language on Tuesday. A memory system persists that preference and loads it on every subsequent turn.
+
+### Five memory types
+
+Treating all memory as one vector store is the most common anti-pattern. Different types of memory have different storage requirements, different retrieval strategies, and different lifecycles. Conflating them produces specific, predictable failure modes.
+
+| Type | Scope | Retrieval | Lifecycle |
+|---|---|---|---|
+| Policy | Tenant | Exact match | Versioned, admin-controlled |
+| Preference | User | Exact match | TTL, user-controlled |
+| Fact | User / Tenant | Hybrid (lexical + vector) | Provenance, supersession |
+| Episodic | User | Semantic | Long-lived, task-gated |
+| Trace | User | Replay by run ID | Retention-bound, append-only |
+
+**Policy** — hard rules and constraints (e.g. "refunds over $500 require human approval"). Tenant-scoped, versioned, retrieved by exact match only. Using vector search to retrieve Policy is a bug: the rule either applies or it doesn't, and "semantically similar" is not good enough.
+
+**Preference** — stable personalisation parameters (e.g. "always respond in JSON", "use DD/MM/YYYY dates"). User-scoped, deterministic lookup every turn. Never retrieved by similarity — missing a preference is not a ranking problem, it is a correctness problem.
+
+**Fact** — durable assertions extracted from conversations, with provenance (e.g. "Acme Corp's production database is PostgreSQL"). Needs hybrid retrieval because queries can be exact ("facts about Acme's infrastructure") or conceptual ("relevant background for this question").
+
+**Episodic** — structured summaries of completed tasks, not raw transcripts. The summary records what should be remembered; the transcript is raw material kept separately in Trace.
+
+**Trace** — append-only raw event log. Every user message, tool call, tool result, and model response. Not retrieved during normal prompt assembly — used for replay, debugging, and as source material for promoting Facts and Episodes.
+
+### Connecting to the procedural memory taxonomy
+
+The Skills taxonomy from the Memory Systems section above maps onto this framework:
+
+- **Official platform skills** (e.g. Claude Code's built-in slash commands) behave like **Policy**: platform-controlled, versioned, loaded for all users, never triggered by semantic similarity.
+- **User-installed skills** behave like **Preference**: user-scoped, personal, loaded deterministically each session.
+
+The content differs (Policy = constraints, Skills = procedures) but the storage and retrieval pattern is the same.
+
+### Two retrieval paths, not one
+
+Every turn runs two fundamentally different retrieval operations.
+
+**Path A — Known-scope lookup (Policy + Preference)**
+
+Runs at session start, regardless of what the user asks. Returns everything that applies — no top-k cutoff, no ranking. Deterministic: same tenant + user always returns the same result.
+
+```sql
+SELECT * FROM policy_memory
+WHERE tenant_id = :tenant_id AND effective_until IS NULL
+UNION ALL
+SELECT * FROM preference_memory
+WHERE tenant_id = :tenant_id AND user_id = :user_id
+```
+
+This feeds the **static prefix** of the prompt, which is a natural fit for KV cache (CAG pattern): the prefix is identical across turns for the same user, so it computes once and stays warm. See [LLM Architecture](../llm_architecture/README.md) for KV cache mechanics.
+
+**Path B — Semantic discovery (Fact + Episodic)**
+
+Runs per-query, after the user sends a message. Hybrid retrieval (lexical + vector, fused and reranked), returns top-k. Probabilistic: relevance-ranked results vary by query.
+
+This feeds the **dynamic tail** of the prompt, reassembled fresh each turn.
+
+The full prompt structure each turn:
+
+```
+[Policy]          ← Path A, static, cached
+[Preference]      ← Path A, static, cached
+[Fact top-k]      ← Path B, dynamic, per-query
+[Episodic top-k]  ← Path B, dynamic, per-query
+[Current turn]    ← live
+```
+
+The prompt is **reassembled, not accumulated**. Context does not grow indefinitely.
+
+### Filter before ranking
+
+In Path B, the scope filter (`WHERE tenant_id = ? AND user_id = ?`) must run **before** vector ranking — not after.
+
+```sql
+-- Wrong: ranks globally, then filters. Two problems:
+-- 1. Rankings are shaped by other tenants' data.
+-- 2. After filtering, fewer than top-k results may remain.
+SELECT * FROM fact_memory
+ORDER BY vector_similarity(embedding, :query)
+FETCH FIRST 100 ROWS ONLY
+-- then WHERE tenant_id = :current_tenant in application code
+
+-- Correct: filter first, rank within scope.
+SELECT * FROM fact_memory
+WHERE tenant_id = :tenant_id AND user_id = :user_id AND status = 'active'
+ORDER BY vector_similarity(embedding, :query)
+FETCH FIRST 5 ROWS ONLY
+```
+
+Filter-before-ranking is a security boundary, not just a performance optimisation. Ranking across all tenants first means the embedding neighbourhood — and therefore the ranking order — was shaped by data the user should never have seen, even if those rows are filtered from the final result.
+
+For Qdrant: **collection-per-tenant** provides the strongest isolation because each tenant has its own HNSW graph. Shared collection with payload filtering is generally safe for most threat models, but the HNSW graph is built across all tenants' data. At large tenant counts (thousands), collection-per-tenant becomes operationally expensive and a shared collection with strict payload filtering may be the right tradeoff.
+
+### Vector index lifecycle: immutable collection + rebuild + swap
+
+HNSW is not designed for high-frequency online modifications. Deletions are soft (the node is marked but the graph structure remains), and many small insertions degrade graph quality over time. This makes HNSW fundamentally a "write once, read many" structure.
+
+The production pattern that addresses this: **immutable collection + rebuild + swap** — a Blue-Green deployment applied to the vector index.
+
+```
+Normal serving: Collection A
+    │
+    ├── Trigger rebuild (embedding model upgrade / bulk deletion / periodic cleanup)
+    │
+    ├── Dual-write: new data goes to both A and B during rebuild
+    │
+    ├── B rebuild completes (clean HNSW graph, deletions applied properly)
+    │
+    ├── Atomic traffic swap: A → B
+    │
+    └── Stop writing to A, reclaim after in-flight requests drain
+```
+
+This pattern solves four problems at once: deletions are applied cleanly (excluded from rebuild rather than soft-deleted), index quality is restored, embedding model upgrades are handled naturally, and schema migrations become a rebuild + swap.
+
+The key engineering detail: **dual-write during rebuild**. New writes must go to both A (still serving traffic) and B (being built). Without this, B is stale the moment it goes live. Cost: write throughput doubles temporarily, and both sides must stay consistent.
+
+**Why this changes the collection-per-tenant calculus**: every rebuild + swap must be executed independently per collection. With 100 tenants: 100 dual-write periods, 100 atomic swaps, 100 cleanup operations. With 10,000 tenants, this becomes operationally unmanageable. A shared collection with payload filtering requires only one rebuild + swap regardless of tenant count. The isolation vs. operational complexity tradeoff is therefore also a function of **tenant count**: collection-per-tenant is viable at small scale, shared collection becomes necessary at large scale.
+
+### Storage
+
+| Type | Store | Reason |
+|---|---|---|
+| Trace | PostgreSQL | Append-only, queried by run_id, matches LangGraph checkpoint pattern |
+| Policy | PostgreSQL | Exact match, versioned, no vector needed |
+| Preference | PostgreSQL / Redis | Exact match, loaded every session — Redis faster for hot path |
+| Fact | PostgreSQL + pgvector | Needs relational filtering AND vector search in one query plan |
+| Episodic | PostgreSQL + pgvector | Same as Fact |
+
+Fact and Episodic need both relational columns (for scope filtering and status) and a vector column (for semantic search) in the same query. pgvector keeps these together so `WHERE tenant_id = ?` and `ORDER BY embedding <=> query` run in one plan — no application-layer result merging across two systems.
+
+### Write path: Promotion Gate
+
+Not everything observed during a run enters durable memory. The Promotion Gate runs after a task completes (not mid-conversation) and applies several checks before writing.
+
+**Why after, not during**: mid-conversation a user might say "we migrated to PostgreSQL... wait, no, that's staging, production is still MySQL." Extracting after completion avoids promoting retracted statements.
+
+**Deduplication**: each candidate Fact gets a content hash scoped to `(tenant_id, user_id)`. The same assertion arriving from two separate runs resolves to one record, not two competing entries in retrieval.
+
+**Contradiction handling — supersession, not deletion**:
+
+```
+Old fact: "production DB is MySQL"    → status = 'superseded', superseded_by = new_fact_id
+New fact: "production DB is PostgreSQL" → status = 'active'
+```
+
+The old record survives for audit purposes. Retrieval filters `WHERE status = 'active'`, so only the current version surfaces. This is the same principle as MVCC: append new state, don't overwrite old state.
+
+**Provisional status**: newly promoted Facts enter as `provisional`, not immediately `active`. A second independent confirmation upgrades to `active`. This prevents a single noisy conversation from poisoning the retrieval layer.
+
+**Scope assignment**: the Gate — not the caller — decides whether a Fact is user-scoped or tenant-scoped. Rule of thumb: if the subject is the user themselves → user scope; if the subject is the company, product, or system → tenant scope. Letting callers pass scope is equivalent to letting users set their own permissions.
+
+### KV cache and prompt stability
+
+Policy and Preference feed the static prefix (Path A), which should hit the KV cache on every turn. Two constraints to maintain cache hit rate:
+
+**Deterministic ordering**: sort Policy and Preference by a stable key (e.g. `created_at ASC` or `policy_key ASC`). Any non-deterministic ordering invalidates the cache.
+
+**Append-only additions**: new Preferences must go at the end of the list. Inserting in the middle shifts all subsequent token positions — everything after the insertion point is a cache miss.
+
+**Policy revocation**: when a Policy is removed or changed, cache miss is unavoidable and should be accepted. Attempting to use placeholder tokens does not help — the placeholder is a different token sequence than the original content, so the cache still misses from that position onwards. This is not a problem in practice because Policy changes are intentionally rare by design. Daily cache stability comes from Preference ordering, not Policy stability.
+
+### Governance
+
+Memory systems amplify privacy stakes. A conversation log is one privacy boundary. A Fact extracted from a hundred conversations and promoted into durable storage is a different kind of artifact — harder to scope, harder to delete, harder to audit.
+
+Three primitives that make governance tractable:
+
+**Scope as structural primitive**: every record carries `tenant_id`, `user_id`, `agent_id`. These are hard predicates enforced at query time (before ranking), not soft filters applied in application code. Scope is an access boundary, not a relevance signal.
+
+**Provenance on every durable record**: `source_run_id` and `source_turn_id` on every Fact and Episode. Without provenance, GDPR right-to-forget is guesswork:
+
+```sql
+-- Find all Facts contributed by Jane across her runs
+SELECT * FROM fact_memory
+WHERE tenant_id = 'acme'
+  AND source_run_id IN (
+    SELECT run_id FROM trace_memory WHERE user_id = 'jane'
+  )
+```
+
+With provenance, you can find exactly which tenant-scoped Facts originated from Jane's conversations — even if they are not user-scoped — and apply the appropriate business policy.
+
+**GDPR deletion is soft, not hard**: physical deletion from a vector index is expensive and degrades index quality. The correct pattern is a tombstone:
+
+```sql
+UPDATE fact_memory
+SET content = '[erased]', embedding = NULL, status = 'revoked'
+WHERE user_id = 'jane' AND tenant_id = 'acme'
+```
+
+Content is erased, the vector is dropped, status is revoked. Retrieval filters `WHERE status = 'active'` so the record never surfaces. The audit trail retains the fact that data existed and was deleted — which is itself a compliance requirement in most jurisdictions.
+
+For tenant-scoped Facts derived from a specific user's conversations (e.g. Jane told the agent something about Acme Corp's infrastructure): whether to delete, retain, or strip provenance is a business and legal decision, not a technical one. Provenance makes that decision possible; without it, you cannot even identify which records to evaluate.
