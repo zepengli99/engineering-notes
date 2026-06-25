@@ -107,6 +107,8 @@ A single slow query can take down an entire system through a chain of positive f
 
 The reason the DB is more dangerous than the app: the app is stateless — one request failing doesn't affect others. The DB is a **shared stateful resource** — connection pool, locks, and Buffer Pool are shared by every request. One slow query's blast radius spans the entire system.
 
+This is the distributed form of a general pattern — "shared finite resource + head-of-line blocking" — that also explains why a CPU or GPU plateaus under load: see [concurrency → Why utilization plateaus](../concurrency/README.md#why-utilization-plateaus). The difference is severity: a slow query is a *positive feedback* collapse (retries amplify it), whereas an under-filled CPU is usually steady-state waste rather than a death spiral.
+
 #### Prevention: three layers of defence
 
 **DB layer — kill slow queries fast.**
@@ -154,7 +156,7 @@ Rate limiting: cap requests at the entry point. Excess requests are rejected wit
 
 ### Connection pool and database concurrency model
 
-**A connection pool is shared per app process, not per user.** All requests on a given app server instance borrow from the same pool, use the connection for one query or transaction, then return it. The pool lives for the lifetime of the process.
+**A connection pool is shared per app process, not per user.** All requests on a given app server instance borrow from the same pool, use the connection for one query or transaction, then return it. The pool lives for the lifetime of the process. This is the same bounded-worker-pool idea as a thread pool — see [concurrency → Thread pool size](../concurrency/README.md#thread-pool-size) for the sizing tradeoff (too few starves the cores, too many thrashes on context switches).
 
 ```
 User A ──┐
@@ -275,7 +277,7 @@ write: update row, keep old version
 read:  read old snapshot directly, no lock needed
 ```
 
-With MVCC, reads and writes rarely block each other. The primary motivation for read/write split today is **capacity**, not lock contention: more replicas means more connection pools, more parallel read throughput, and better user experience under load.
+With MVCC, reads and writes rarely block each other. The primary motivation for read/write split today is **capacity**, not lock contention: more replicas means more connection pools, more parallel read throughput, and better user experience under load. The version-chain, snapshot, and vacuum mechanics behind MVCC are in [transactions → MVCC](../transactions/README.md#mvcc--how-isolation-actually-works).
 
 #### How replication works
 

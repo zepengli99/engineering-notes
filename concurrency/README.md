@@ -153,7 +153,7 @@ Sweet spot (rule of thumb):
 ```
 
 > **Q I had: isn't this the same idea as message queues — bounded consumers protect the server from being overwhelmed?**
-> Yes, exactly the same idea at different scales. Thread pool = bounded workers for a single process. Message queue (Kafka, RabbitMQ) = bounded workers across a distributed system. Both use the "bounded capacity + queue" pattern to absorb traffic spikes without collapsing. The same thinking shows up in DB connection pools, OS network packet queues, and checkout lines.
+> Yes, exactly the same idea at different scales. Thread pool = bounded workers for a single process. Message queue (Kafka, RabbitMQ) = bounded workers across a distributed system. Both use the "bounded capacity + queue" pattern to absorb traffic spikes without collapsing. The same thinking shows up in [DB connection pools](../system_design/README.md#connection-pool-and-database-concurrency-model), OS network packet queues, and checkout lines.
 
 ---
 
@@ -230,6 +230,24 @@ What actually happens:
 
 > **Insight: this is the same pattern as async web APIs.**
 > Submit a long task → get a `job_id` back immediately (don't wait) → webhook fires when done. `run_in_executor` returns a Future immediately (the "job_id"), the thread runs in the background, `set_result` is the webhook, `await` is waiting at the door. `gather` = `Promise.all()` = fire multiple requests and wait for all of them.
+
+---
+
+### Why utilization plateaus
+
+A counterintuitive but common signal: load is high, requests are queuing, yet CPU utilization sits flat at some fraction — say 50% — and never climbs. The instinct is "add more cores." Almost always the real cause is one of five, and none of them is "not enough compute":
+
+```
+parallelism not filled  → one CPU-bound thread on a 2-core box maxes one core → 50%
+serial bottleneck       → threads exist but serialize on a lock, the GIL, or a single DB connection
+waiting for data        → threads block on disk / network / DB; the core idles with nothing to run (IO-bound)
+artificial cap          → a thread pool size or cgroup CPU quota holds concurrency below the core count
+misleading metric       → iowait counted as "busy", or hyperthread siblings give diminishing returns
+```
+
+The fix follows from the cause, not the symptom: parallelize to fill the cores (not "buy more cores"), remove the serial point, feed data faster, or raise the cap. Adding compute when the bottleneck is a serial point or IO wait changes nothing — the new cores idle exactly like the old ones did.
+
+> **Insight: "shared finite resource + head-of-line blocking" recurs across the whole stack.** The same shape that plateaus a CPU shows up everywhere utilization stalls under load. A single [slow SQL exhausting the connection pool](../system_design/README.md#how-a-slow-sql-cascades-into-a-full-outage) is the distributed version — one query holds a shared slot the way one thread holds a core. A GPU stuck at "50% useful work" under [static batching](../llm_architecture/README.md#continuous-batching) is the scheduling version — finished requests leave batch slots idle the way a thread pool too small to fill the cores does. And [decode being memory-bandwidth-bound](../llm_architecture/README.md#quantisation-why-its-fast) — compute units idle waiting for weights to arrive from VRAM — is the exact GPU analogue of a CPU idling on IO wait: same "waiting for data", different data.
 
 ---
 

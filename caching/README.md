@@ -259,7 +259,7 @@ or the resource being protected isn't in a DB  →  Distributed lock (Redis)
 
 The distributed lock is also used beyond caching: preventing duplicate cron jobs, ensuring idempotent payment processing, leader election.
 
-> **Q I had: is a distributed lock just a Redis version of threading.Lock()?**
+> **Q I had: is a distributed lock just a Redis version of [`threading.Lock()`](../concurrency/README.md#lock)?**
 > Same concept, different failure modes. A thread mutex is managed by the OS — if the thread dies, the OS can clean up. A Redis lock is just a key — if the holder crashes, the key stays until TTL expires. This is why `px=10_000` (auto-expiry) is non-negotiable: it's the safety net for crashed holders. Production locks also use a unique value per holder and check before deleting, to avoid releasing someone else's lock.
 
 ---
@@ -420,7 +420,7 @@ Redis multi-step:  GET key  → compute → SET key           (same gap)
 Cache stampede:    check cache → miss → query DB → write  (same gap)
 ```
 
-The fix is always the same: collapse the gap. Use atomic operations (`INCR`, `SELECT FOR UPDATE`, `SET NX`) or accept the gap and handle the consequences (logical TTL serving stale data, circuit breaker absorbing DB failures).
+The fix is always the same: collapse the gap. Use atomic operations (`INCR`, `SELECT FOR UPDATE`, `SET NX`) or accept the gap and handle the consequences (logical TTL serving stale data, circuit breaker absorbing DB failures). The DB-transaction form of this race — and the isolation levels that close it — is [lost update](../transactions/README.md#lost-update).
 
 ### Caching and MVCC
 
@@ -439,6 +439,8 @@ Long TTL                    → stale data served for longer
 Read replicas are safe because MVCC guarantees readers never block writers.
 Cache serves the same role at the application layer.
 ```
+
+The version-chain, snapshot, and vacuum mechanics behind MVCC are in [transactions → MVCC](../transactions/README.md#mvcc--how-isolation-actually-works).
 
 ### Practical rules
 
