@@ -289,6 +289,25 @@ Multiple full replicas:         data parallelism (for higher throughput)
 
 A 70B model might run across 2 machines × 4 GPUs each — tensor parallel within each machine, pipeline parallel across the two machines.
 
+**KV cache is sharded the same way as model weights.**
+
+The two largest VRAM consumers — weights and KV cache — both shrink under the same parallelism ratio:
+
+```
+Tensor parallel (TP=8, attention has 8 KV heads):
+  each GPU holds: 1/8 of weights  (its own attention heads)
+                  1/8 of KV cache (K and V for those same heads)
+
+Pipeline parallel (80 layers split across 4 machines, 20 layers each):
+  each machine holds: 20 layers of weights
+                      20 layers of KV cache
+
+Data parallel (each GPU is a full model replica):
+  KV cache is not shared — each replica holds the KV for its own batch independently
+```
+
+Tensor parallelism is therefore a double-win for long-context or high-concurrency workloads: the per-GPU weight footprint shrinks by 1/TP, and the per-GPU KV cache footprint shrinks by the same ratio. VRAM is split between weights (fixed) and KV cache (grows with load) — parallelism scales both down together.
+
 ---
 
 ### Transformer architecture
