@@ -31,7 +31,7 @@ These two steps can fail independently:
 - Bad retrieval + good generation → confident, well-formed answer that's missing key info
 - Bad retrieval + bad generation → both problems compound
 
-Measuring the final answer alone doesn't tell you which component failed. You need separate metrics for each stage.
+Measuring the final answer alone doesn't tell you which component failed. You need separate metrics for each stage. The pipeline being evaluated here — retriever, embeddings, vector search, reranker, generator — is built in [LLM Architecture → RAG](../llm_architecture/README.md#rag-retrieval-augmented-generation).
 
 ---
 
@@ -304,7 +304,7 @@ Everything above is **offline eval**: curate a fixed test set, run the system on
 1. **Test sets go stale.** User query patterns drift over time. A test set written at launch doesn't represent what users ask six months later.
 2. **You don't know what you don't know.** A curated test set covers scenarios you thought of. Production traffic surfaces scenarios you didn't.
 
-Online eval runs evaluation continuously on sampled live traffic, catching what offline eval misses.
+Online eval runs evaluation continuously on sampled live traffic, catching what offline eval misses. This is the eval half of the production loop in [LLM Architecture → MLOps](../llm_architecture/README.md#mlops-from-research-to-production) — versioning code, data, and weights, then monitoring live behaviour.
 
 ### Which metrics work online
 

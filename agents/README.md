@@ -209,7 +209,7 @@ A skill is a procedure. A tool is a function call. Skills typically orchestrate 
 
 ## Reasoning Models in Agents
 
-Reasoning models (o1, Claude extended thinking) do extended internal chain-of-thought before generating a response. The thinking is hidden — you see only the final output — but the model has already worked through the problem in depth.
+Reasoning models (o1, Claude extended thinking) do extended internal chain-of-thought before generating a response. The thinking is hidden — you see only the final output — but the model has already worked through the problem in depth. Why spending compute at inference time improves answers — the test-time compute scaling curve — is in [LLM Architecture → Scaling laws and test-time compute](../llm_architecture/README.md#scaling-laws-and-test-time-compute).
 
 ### How this changes the ReAct loop
 
@@ -478,7 +478,7 @@ JWT is stateless — no database lookup needed to validate identity. One caveat:
 
 ### Prompt injection defence
 
-Malicious instructions hidden in user input or tool results that attempt to override the agent's behaviour.
+Malicious instructions hidden in user input or tool results that attempt to override the agent's behaviour. The attack taxonomy (direct vs indirect) and model-level picture are in [LLM Architecture → Prompt injection and defence](../llm_architecture/README.md#prompt-injection-and-defence); this section focuses on the engineering-layer defences.
 
 **Direct injection** — user embeds instructions in their message:
 
@@ -839,7 +839,7 @@ ORDER BY vector_similarity(embedding, :query)
 FETCH FIRST 5 ROWS ONLY
 ```
 
-Filter-before-ranking is a security boundary, not just a performance optimisation. Ranking across all tenants first means the embedding neighbourhood — and therefore the ranking order — was shaped by data the user should never have seen, even if those rows are filtered from the final result.
+Filter-before-ranking is a security boundary, not just a performance optimisation. Ranking across all tenants first means the embedding neighbourhood — and therefore the ranking order — was shaped by data the user should never have seen, even if those rows are filtered from the final result. (The HNSW graph and ANN search this ranks with are covered in [LLM Architecture → Vector databases](../llm_architecture/README.md#vector-databases-and-approximate-nearest-neighbour-search).)
 
 For Qdrant: **collection-per-tenant** provides the strongest isolation because each tenant has its own HNSW graph. Shared collection with payload filtering is generally safe for most threat models, but the HNSW graph is built across all tenants' data. At large tenant counts (thousands), collection-per-tenant becomes operationally expensive and a shared collection with strict payload filtering may be the right tradeoff.
 

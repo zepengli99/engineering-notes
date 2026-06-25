@@ -326,7 +326,7 @@ Forces the model to return a Pydantic object via function calling. Three methods
 | `"json_schema"` + `strict=True` | API-level constrained decoding | near 100%, few models support it |
 | `"json_mode"` | just asks for JSON, no schema | weakest — prompt must specify format |
 
-No retry logic. Validation failure raises immediately.
+No retry logic. Validation failure raises immediately. The `json_schema` + `strict` row is constrained decoding at the sampling layer — how it works (logit masking, FSM/grammar) is in [LLM Architecture → Structured output and constrained decoding](../llm_architecture/README.md#structured-output-and-constrained-decoding).
 
 ### Instructor: smart retry
 

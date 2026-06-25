@@ -109,7 +109,7 @@ The GPU runs at maximum batch size at all times. PagedAttention makes this possi
 
 ## Preemption
 
-When the block pool fills mid-decode, the scheduler must evict a running sequence to free blocks for others.
+When the block pool fills mid-decode, the scheduler must evict a running sequence to free blocks for others. This is eviction under memory pressure — the same problem [caching → Cache Eviction](../caching/README.md#cache-eviction) solves with LRU/LFU, except vLLM evicts whole sequences (recompute vs swap) rather than individual keys.
 
 ### Who gets evicted: FCFS reverse
 

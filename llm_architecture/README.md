@@ -209,6 +209,8 @@ The compute units are mostly idle, waiting for data to arrive from VRAM.
 This phase is memory-bandwidth-bound, not compute-bound.
 ```
 
+This is the GPU mirror of a CPU stuck in IO wait — the processing units idle not for lack of work but for lack of data. The same "utilization is high but the units are starved" trap appears across the stack; see [concurrency → Why utilization plateaus](../concurrency/README.md#why-utilization-plateaus).
+
 Quantisation reduces the weight size. Less data to read means less waiting:
 
 ```
@@ -627,6 +629,8 @@ steps 11–100: B still generating, A's GPU slot sits idle
 ```
 
 Worse, new requests pile up outside waiting for the batch to drain, even though GPU capacity is partly free.
+
+This "50% useful work" is the scheduling form of a pattern that also plateaus CPUs — finished requests leave batch slots idle the way a thread pool too small to fill the cores does. The general taxonomy is in [concurrency → Why utilization plateaus](../concurrency/README.md#why-utilization-plateaus).
 
 **Continuous batching schedules at the iteration level, not the request level.** After every single decode step, the scheduler checks for completed requests and immediately swaps them out for waiting ones:
 
@@ -2075,6 +2079,8 @@ The model learns visual-language correspondence during training because gradient
 
 ### Prompt injection and defence
 
+The agent-specific, engineering-layer defences (tool permission scoping, sandboxing, output monitoring) are in [agents → Prompt injection defence](../agents/README.md#prompt-injection-defence). This section covers the attack surfaces and the model-level picture.
+
 **Two attack surfaces**
 
 Direct prompt injection: the user is the attacker, crafting input to override the system prompt.
@@ -2364,6 +2370,8 @@ content characteristics:
 ---
 
 ### Scaling laws and test-time compute
+
+How reasoning models exploit the test-time compute curve inside an agent loop is in [agents → Reasoning Models](../agents/README.md#reasoning-models-in-agents).
 
 **The power law relationship**
 
