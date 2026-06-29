@@ -20,6 +20,7 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 | 🕸️ | [LangGraph](langgraph/) | StateGraph, checkpointing, human-in-the-loop, multi-agent, Send API |
 | 🤖 | [Agents](agents/) | A2A, memory systems, reasoning models, production harness, framework comparison |
 | 📊 | [LLM Evals](llm_evals/) | RAG evaluation, context metrics, faithfulness, answer relevance, LLM-as-judge |
+| 🔐 | [Auth & Identity](auth/) | IAM, OAuth 2.0, PKCE, OIDC, Keycloak, SPIFFE/SPIRE |
 
 More topics added over time.
 
