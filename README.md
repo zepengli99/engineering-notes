@@ -21,6 +21,7 @@ Personal notes on engineering topics — things I've worked through, gotten conf
 | 🤖 | [Agents](agents/) | A2A, memory systems, reasoning models, production harness, framework comparison |
 | 📊 | [LLM Evals](llm_evals/) | RAG evaluation, context metrics, faithfulness, answer relevance, LLM-as-judge |
 | 🔐 | [Auth & Identity](auth/) | IAM, OAuth 2.0, PKCE, OIDC, Keycloak, SPIFFE/SPIRE |
+| 📋 | [Agile & Rally](agile/) | Sprint, Epic, Story, Task, Rally (Broadcom Agile Central) |
 
 More topics added over time.
 
